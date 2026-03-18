@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
-import { api, type ATSCheckResult, type ATSUsage } from '@/lib/api';
+import { useEffect, useState, type ReactNode } from 'react';
+import { Eye, Trash2 } from 'lucide-react';
+import { api, type ATSCheckResult, type ATSScanHistoryItem, type ATSUsage } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
@@ -147,6 +148,10 @@ export function ATSCheck() {
   const [result, setResult] = useState<ATSCheckResult | null>(null);
   const [usage, setUsage] = useState<ATSUsage | null>(null);
   const [usageLoading, setUsageLoading] = useState(true);
+  const [history, setHistory] = useState<ATSScanHistoryItem[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [deletingScanId, setDeletingScanId] = useState<number | null>(null);
+  const [viewingDeletedCVSnapshot, setViewingDeletedCVSnapshot] = useState(false);
   const [selectedResumeMeta, setSelectedResumeMeta] = useState<{
     resumeId: number;
     fileName: string;
@@ -167,8 +172,23 @@ export function ATSCheck() {
     }
   };
 
+  const loadHistory = async () => {
+    setHistoryLoading(true);
+    try {
+      const res = await api.ats.history();
+      if (res.success) {
+        setHistory(res.data);
+      }
+    } catch {
+      setHistory([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
   useEffect(() => {
     void loadUsage();
+    void loadHistory();
   }, []);
 
   const set = (key: string) => (
@@ -193,16 +213,21 @@ export function ATSCheck() {
     if (!validate()) return;
     setLoading(true);
     setResult(null);
+    setViewingDeletedCVSnapshot(false);
     try {
       const res = await api.ats.check({
         resume_text: form.resume_text.trim(),
         job_description: form.job_description.trim(),
         ...(form.target_role.trim() && { target_role: form.target_role.trim() }),
         ...(form.industry.trim() && { industry: form.industry.trim() }),
+        ...(selectedResumeMeta?.resumeId && { resume_id: selectedResumeMeta.resumeId }),
+        ...(selectedResumeMeta?.fileName && { resume_file_name: selectedResumeMeta.fileName }),
+        ...(selectedResumeMeta?.fileType && { resume_file_type: selectedResumeMeta.fileType }),
       });
       if (res.success) {
         setResult(res.data);
         toast({ title: 'ATS check complete ✓' });
+        void loadHistory();
       }
     } catch (err: unknown) {
       toast({
@@ -216,15 +241,104 @@ export function ATSCheck() {
     }
   };
 
-  const usageText = usageLoading
-    ? 'Checking daily usage...'
-    : usage
-    ? `AI scans today: ${usage.used_today}/${usage.daily_limit} • Remaining: ${usage.remaining_today}`
-    : 'AI usage unavailable right now';
+  const handleDeleteScan = async (scanId: number) => {
+    setDeletingScanId(scanId);
+    try {
+      const res = await api.ats.deleteHistoryItem(scanId);
+      if (res.success) {
+        setHistory(prev => prev.filter(item => item.scan_id !== scanId));
+        toast({ title: 'Scan removed' });
+      }
+    } catch (err: unknown) {
+      toast({
+        title: 'Unable to delete scan',
+        description: err instanceof Error ? err.message : 'Please try again',
+        variant: 'destructive',
+      });
+    } finally {
+      setDeletingScanId(null);
+    }
+  };
+
+  const inferFileTypeFromName = (fileName?: string | null): string | null => {
+    if (!fileName) return null;
+    const lower = fileName.toLowerCase();
+    if (lower.endsWith('.pdf')) return 'pdf';
+    if (lower.endsWith('.docx')) return 'docx';
+    return null;
+  };
+
+  const handleViewScanSummary = (scan: ATSScanHistoryItem) => {
+    setResult({
+      overall_score: scan.overall_score,
+      breakdown: scan.breakdown,
+      matched_keywords: scan.matched_keywords,
+      missing_keywords: scan.missing_keywords,
+      section_gaps: scan.section_gaps,
+      recommendations: scan.recommendations,
+    });
+
+    setForm(prev => ({
+      ...prev,
+      resume_text: scan.resume_text_snapshot || prev.resume_text,
+      job_description: scan.job_description_snapshot || prev.job_description,
+      target_role: scan.target_role || '',
+      industry: scan.industry || '',
+    }));
+
+    setErrors({});
+
+    const derivedFileType = scan.resume_file_type || inferFileTypeFromName(scan.resume_file_name);
+    if (scan.resume_id) {
+      // CV still exists in library - load it for preview
+      setSelectedResumeMeta({
+        resumeId: scan.resume_id,
+        fileName: scan.resume_file_name || '',
+        fileType: derivedFileType || 'pdf',
+      });
+      setViewingDeletedCVSnapshot(false);
+    } else {
+      // CV was deleted - clear selection so form shows snapshot message instead of trying to load
+      setSelectedResumeMeta(null);
+      setViewingDeletedCVSnapshot(true);
+    }
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const formatScanDate = (value: string) => {
+    const dt = new Date(value);
+    if (Number.isNaN(dt.getTime())) return value;
+    return dt.toLocaleString([], {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  };
+
+  const usageText: ReactNode = usageLoading ? (
+    'Checking daily usage...'
+  ) : usage ? (
+    <>
+      <span className="text-destructive">
+        AI scans today: {usage.used_today}/{usage.daily_limit}
+      </span>
+      <span aria-hidden="true" className="text-muted-foreground">
+        {' '}
+        •{' '}
+      </span>
+      <span className="text-green-600">Remaining: {usage.remaining_today}</span>
+    </>
+  ) : (
+    'AI usage unavailable right now'
+  );
 
   return (
-    <div className="grid gap-6 lg:grid-cols-2 items-start">
-      <div className="space-y-4 lg:sticky lg:top-24 animate-fade-up">
+    <div className="space-y-6">
+      <div className="grid gap-6 lg:grid-cols-2 items-start">
+        <div className="space-y-4 lg:sticky lg:top-24 animate-fade-up">
         <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Result</h3>
         {loading ? (
           <AIScanAnimation />
@@ -237,9 +351,9 @@ export function ATSCheck() {
             </p>
           </ResultBlock>
         )}
-      </div>
+        </div>
 
-      <form onSubmit={handleSubmit} className="space-y-4 animate-slide-in-right rounded-2xl border border-border bg-card px-4 py-5 shadow-brand-sm">
+        <form onSubmit={handleSubmit} className="space-y-4 animate-slide-in-right rounded-2xl border border-border bg-card px-4 py-5 shadow-brand-sm">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">ATS Check</h3>
           <p className="text-xs text-muted-foreground">{usageText}</p>
@@ -280,6 +394,7 @@ export function ATSCheck() {
                   fileName: selection.fileName,
                   fileType: selection.fileType,
                 });
+                setViewingDeletedCVSnapshot(false);
               }}
             />
           </div>
@@ -290,6 +405,13 @@ export function ATSCheck() {
               fileName={selectedResumeMeta.fileName}
               fileType={selectedResumeMeta.fileType}
             />
+          ) : viewingDeletedCVSnapshot ? (
+            <div className="rounded-md border border-amber-400 bg-amber-50 p-3">
+              <p className="text-sm font-medium text-amber-900">CV No Longer Available</p>
+              <p className="mt-1 text-xs text-amber-800">
+                The original CV was deleted from your library. Showing snapshot of the resume text that was used during this scan.
+              </p>
+            </div>
           ) : (
             <p className="rounded-md border border-dashed border-border bg-background p-3 text-sm text-muted-foreground">
               Select or upload a resume to preview it here. Extracted text is used internally for ATS analysis and is not displayed.
@@ -327,7 +449,74 @@ export function ATSCheck() {
             'Run ATS Check'
           )}
         </Button>
-      </form>
+        </form>
+      </div>
+
+      <section className="rounded-2xl border border-border bg-card p-5 shadow-brand-sm animate-fade-up space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-base font-semibold text-foreground">Your Scans</h3>
+          <span className="text-xs text-muted-foreground">{history.length} saved</span>
+        </div>
+
+        {historyLoading ? (
+          <p className="text-sm text-muted-foreground">Loading scan history...</p>
+        ) : history.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No scans yet. Run ATS Check to save your CV analysis history.
+          </p>
+        ) : (
+          <ul className="space-y-2">
+            {history.map(scan => (
+              <li key={scan.scan_id} className="rounded-xl border border-border bg-background px-4 py-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="rounded-full border border-border bg-card px-2 py-0.5 text-xs font-semibold text-foreground">
+                        ATS {scan.overall_score}/100
+                      </span>
+                      <span className="text-xs text-muted-foreground">{formatScanDate(scan.created_at)}</span>
+                      {!scan.resume_id && (
+                        <span className="rounded-full border border-amber-400 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
+                          CV Deleted
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-sm text-foreground leading-relaxed">{scan.summary}</p>
+                    <p className="text-xs text-muted-foreground">
+                      CV: {scan.resume_file_name || 'Custom text'}
+                      {!scan.resume_id && scan.resume_file_name && ' (deleted)'} • Matched: {scan.matched_keywords_count} • Missing: {scan.missing_keywords_count}
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleViewScanSummary(scan)}
+                      className="gap-1.5"
+                    >
+                      <Eye className="h-4 w-4" />
+                      View Full Summary
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      onClick={() => handleDeleteScan(scan.scan_id)}
+                      disabled={deletingScanId === scan.scan_id}
+                      aria-label="Delete scan history item"
+                      className="text-muted-foreground hover:text-destructive hover:border-destructive"
+                    >
+                      <Trash2 />
+                    </Button>
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </div>
   );
 }

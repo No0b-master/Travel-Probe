@@ -17,6 +17,7 @@ import requests
 from app.models.schemas import (
     ATSCheckRequest,
     ATSCheckResponse,
+    ATSScanHistoryItem,
     KeywordGapRequest,
     KeywordGapResponse,
     ResumeExtractResponse,
@@ -90,8 +91,82 @@ class ATSService:
 
     def check_ats(self, payload: ATSCheckRequest, user_id: int) -> ATSCheckResponse:
         self._consume_scan_quota(user_id)
+        result = self._check_ats_with_gemini(payload)
+        self._save_scan_history(user_id, payload, result)
+        return result
 
-        return self._check_ats_with_gemini(payload)
+    def list_scan_history(self, user_id: int) -> list[ATSScanHistoryItem]:
+        with closing(self._get_connection()) as conn:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT
+                    id AS scan_id,
+                    resume_id,
+                    resume_file_name,
+                    resume_file_type,
+                    target_role,
+                    industry,
+                    resume_text_snapshot,
+                    job_description_snapshot,
+                    overall_score,
+                    breakdown_json,
+                    matched_keywords_json,
+                    missing_keywords_json,
+                    section_gaps_json,
+                    recommendations_json,
+                    matched_keywords_count,
+                    missing_keywords_count,
+                    section_gaps_count,
+                    summary,
+                    created_at
+                FROM ats_scan_history
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+                """,
+                (user_id,),
+            )
+            rows = cursor.fetchall()
+
+        history: list[ATSScanHistoryItem] = []
+        for row in rows:
+            history.append(
+                ATSScanHistoryItem(
+                    scan_id=row["scan_id"],
+                    resume_id=row.get("resume_id"),
+                    resume_file_name=row.get("resume_file_name"),
+                    resume_file_type=row.get("resume_file_type"),
+                    target_role=row.get("target_role"),
+                    industry=row.get("industry"),
+                    resume_text_snapshot=self._coerce_long_text(row.get("resume_text_snapshot")),
+                    job_description_snapshot=self._coerce_long_text(row.get("job_description_snapshot")),
+                    overall_score=float(row.get("overall_score") or 0),
+                    breakdown=ScoreBreakdown(**self._parse_json_object(row.get("breakdown_json"))),
+                    matched_keywords=self._parse_json_string_list(row.get("matched_keywords_json")),
+                    missing_keywords=self._parse_json_string_list(row.get("missing_keywords_json")),
+                    section_gaps=self._parse_json_string_list(row.get("section_gaps_json")),
+                    recommendations=self._parse_json_string_list(row.get("recommendations_json")),
+                    matched_keywords_count=int(row.get("matched_keywords_count") or 0),
+                    missing_keywords_count=int(row.get("missing_keywords_count") or 0),
+                    section_gaps_count=int(row.get("section_gaps_count") or 0),
+                    summary=row.get("summary") or "",
+                    created_at=row["created_at"],
+                )
+            )
+
+        return history
+
+    def delete_scan_history_item(self, user_id: int, scan_id: int) -> None:
+        with closing(self._get_connection()) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM ats_scan_history WHERE id = %s AND user_id = %s",
+                (scan_id, user_id),
+            )
+            conn.commit()
+
+            if cursor.rowcount == 0:
+                raise ValueError("Scan history item not found")
 
     def get_scan_usage(self, user_id: int) -> dict[str, Any]:
         scan_day = self._today_utc_date()
@@ -436,6 +511,73 @@ class ATSService:
             )
             conn.commit()
 
+    def _save_scan_history(self, user_id: int, payload: ATSCheckRequest, result: ATSCheckResponse) -> None:
+        resume_file_name = self._normalize_optional_short_text(payload.resume_file_name, max_length=255)
+        resume_file_type = self._normalize_optional_short_text(payload.resume_file_type, max_length=16)
+        target_role = self._normalize_optional_short_text(payload.target_role, max_length=255)
+        industry = self._normalize_optional_short_text(payload.industry, max_length=255)
+
+        with closing(self._get_connection()) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO ats_scan_history (
+                    user_id,
+                    resume_id,
+                    resume_file_name,
+                    resume_file_type,
+                    target_role,
+                    industry,
+                    resume_text_snapshot,
+                    job_description_snapshot,
+                    overall_score,
+                    breakdown_json,
+                    matched_keywords_json,
+                    missing_keywords_json,
+                    section_gaps_json,
+                    recommendations_json,
+                    matched_keywords_count,
+                    missing_keywords_count,
+                    section_gaps_count,
+                    summary,
+                    created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    user_id,
+                    payload.resume_id,
+                    resume_file_name,
+                    resume_file_type,
+                    target_role,
+                    industry,
+                    payload.resume_text,
+                    payload.job_description,
+                    result.overall_score,
+                    json.dumps(result.breakdown.model_dump()),
+                    json.dumps(result.matched_keywords),
+                    json.dumps(result.missing_keywords),
+                    json.dumps(result.section_gaps),
+                    json.dumps(result.recommendations),
+                    len(result.matched_keywords),
+                    len(result.missing_keywords),
+                    len(result.section_gaps),
+                    self._build_scan_summary(payload, result),
+                    self._now_utc(),
+                ),
+            )
+            conn.commit()
+
+    def _build_scan_summary(self, payload: ATSCheckRequest, result: ATSCheckResponse) -> str:
+        resume_label = (payload.resume_file_name or "Your CV").strip() or "Your CV"
+        role_label = (payload.target_role or "target role").strip() or "target role"
+        return (
+            f"{resume_label} vs {role_label}: "
+            f"{len(result.matched_keywords)} matched keywords, "
+            f"{len(result.missing_keywords)} missing, "
+            f"{len(result.section_gaps)} section gaps."
+        )
+
     def _extract_text_from_docx(self, file_bytes: bytes) -> str:
         document = Document(BytesIO(file_bytes))
         return "\n".join(paragraph.text for paragraph in document.paragraphs)
@@ -579,6 +721,71 @@ class ATSService:
         if whole == 0:
             return 0.0
         return round((part / whole) * 100, 2)
+
+    @staticmethod
+    def _normalize_optional_short_text(value: str | None, max_length: int) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        return normalized[:max_length]
+
+    @staticmethod
+    def _parse_json_object(value: Any) -> dict[str, float]:
+        default = {
+            "keyword_match": 0.0,
+            "section_completeness": 0.0,
+            "readability": 0.0,
+            "uae_market_fit": 0.0,
+        }
+        if not value:
+            return default
+
+        try:
+            parsed = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return default
+
+        if not isinstance(parsed, dict):
+            return default
+
+        result = default.copy()
+        for key in result:
+            try:
+                result[key] = float(parsed.get(key, 0.0))
+            except (TypeError, ValueError):
+                result[key] = 0.0
+        return result
+
+    @staticmethod
+    def _parse_json_string_list(value: Any) -> list[str]:
+        if not value:
+            return []
+
+        try:
+            parsed = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return []
+
+        if not isinstance(parsed, list):
+            return []
+
+        cleaned: list[str] = []
+        for item in parsed:
+            if isinstance(item, str):
+                normalized = item.strip()
+                if normalized:
+                    cleaned.append(normalized)
+        return cleaned
+
+    @staticmethod
+    def _coerce_long_text(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        return str(value)
 
     def _get_connection(self, include_database: bool = True) -> MySQLConnectionAbstract:
         config = {

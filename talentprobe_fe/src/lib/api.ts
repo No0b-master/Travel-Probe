@@ -88,6 +88,9 @@ export interface ATSCheckPayload {
   job_description: string;
   target_role?: string;
   industry?: string;
+  resume_id?: number;
+  resume_file_name?: string;
+  resume_file_type?: string;
 }
 
 export interface ATSCheckResult {
@@ -106,6 +109,28 @@ export interface ATSUsage {
   used_today: number;
   remaining_today: number;
   reset_at_utc: string;
+}
+
+export interface ATSScanHistoryItem {
+  scan_id: number;
+  resume_id?: number | null;
+  resume_file_name?: string | null;
+  resume_file_type?: string | null;
+  target_role?: string | null;
+  industry?: string | null;
+  resume_text_snapshot: string;
+  job_description_snapshot: string;
+  overall_score: number;
+  breakdown: Record<string, number>;
+  matched_keywords: string[];
+  missing_keywords: string[];
+  section_gaps: string[];
+  recommendations: string[];
+  matched_keywords_count: number;
+  missing_keywords_count: number;
+  section_gaps_count: number;
+  summary: string;
+  created_at: string;
 }
 
 export interface ResumeOptimizePayload {
@@ -321,6 +346,16 @@ export const api = {
     usage: () =>
       request<ApiResponse<ATSUsage>>('/api/v1/ats/usage', {
         method: 'GET',
+      }, true),
+
+    history: () =>
+      request<ApiResponse<ATSScanHistoryItem[]>>('/api/v1/ats/history', {
+        method: 'GET',
+      }, true),
+
+    deleteHistoryItem: (scanId: number) =>
+      request<ApiResponse<{ deleted: boolean; scan_id: number }>>(`/api/v1/ats/history/${scanId}`, {
+        method: 'DELETE',
       }, true),
 
     check: (payload: ATSCheckPayload) =>

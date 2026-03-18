@@ -9,6 +9,9 @@ class ATSCheckRequest(BaseModel):
     job_description: str = Field(..., min_length=50, description="Target job description")
     target_role: Optional[str] = Field(default=None, description="Optional target role")
     industry: Optional[str] = Field(default=None, description="Optional target industry")
+    resume_id: Optional[int] = Field(default=None, ge=1, description="Optional stored resume id")
+    resume_file_name: Optional[str] = Field(default=None, max_length=255, description="Optional stored resume file name")
+    resume_file_type: Optional[str] = Field(default=None, max_length=16, description="Optional stored resume file type")
 
 
 class ScoreBreakdown(BaseModel):
@@ -32,6 +35,28 @@ class ATSUsageResponse(BaseModel):
     used_today: int
     remaining_today: int
     reset_at_utc: datetime
+
+
+class ATSScanHistoryItem(BaseModel):
+    scan_id: int
+    resume_id: Optional[int] = None
+    resume_file_name: Optional[str] = None
+    resume_file_type: Optional[str] = None
+    target_role: Optional[str] = None
+    industry: Optional[str] = None
+    resume_text_snapshot: str
+    job_description_snapshot: str
+    overall_score: float
+    breakdown: ScoreBreakdown
+    matched_keywords: List[str]
+    missing_keywords: List[str]
+    section_gaps: List[str]
+    recommendations: List[str]
+    matched_keywords_count: int
+    missing_keywords_count: int
+    section_gaps_count: int
+    summary: str
+    created_at: datetime
 
 
 class ResumeOptimizeRequest(BaseModel):

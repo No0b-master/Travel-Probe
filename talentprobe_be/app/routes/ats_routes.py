@@ -19,6 +19,19 @@ def ats_usage(current_user: RegisteredUser = Depends(get_current_user)):
     return controller.get_ats_usage(current_user)
 
 
+@router.get("/ats/history")
+def ats_history(current_user: RegisteredUser = Depends(get_current_user)):
+    return controller.list_ats_history(current_user)
+
+
+@router.delete("/ats/history/{scan_id}")
+def delete_ats_history_item(scan_id: int, current_user: RegisteredUser = Depends(get_current_user)):
+    try:
+        return controller.delete_ats_history_item(current_user, scan_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post("/ats/check")
 def ats_check(payload: ATSCheckRequest, current_user: RegisteredUser = Depends(get_current_user)):
     try:

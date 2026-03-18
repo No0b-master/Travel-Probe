@@ -26,6 +26,14 @@ class ATSController:
         usage = ATSUsageResponse(**self.service.get_scan_usage(current_user.user_id))
         return success_response(usage.model_dump())
 
+    def list_ats_history(self, current_user: RegisteredUser):
+        items = self.service.list_scan_history(current_user.user_id)
+        return success_response([item.model_dump() for item in items])
+
+    def delete_ats_history_item(self, current_user: RegisteredUser, scan_id: int):
+        self.service.delete_scan_history_item(current_user.user_id, scan_id)
+        return success_response({"deleted": True, "scan_id": scan_id})
+
     def optimize_resume(self, payload: ResumeOptimizeRequest):
         result = self.service.optimize_resume(payload)
         return success_response(result.model_dump())
